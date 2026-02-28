@@ -1,0 +1,41 @@
+# Claude Code settings
+.claude/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# Virtual environment
+.venv/
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Audio/output files (user data, not part of the tool)
+*.mp3
+*.mp4
+*.wav
+*.m4a
+*.ogg
+*.flac
+*_transcribe_log.txt
+*_transcribe_clean.txt
+*_translate_log.txt
+*_translate_clean.txt
+*_diarize_log.txt
+*_diarize_clean.txt
+
+# Misc
+_ul
+*.tmp
