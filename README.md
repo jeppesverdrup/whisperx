@@ -9,7 +9,7 @@
                         |_|
 ```
 
-**A simple, local-first audio transcription tool with three modes: Transcribe, Translate, and Diarize.**
+**A simple audio transcription tool with four modes: Transcribe, Translate, Diarize, and ElevenLabs Scribe.**
 
 Created by Jeppe Sverdrup
 
@@ -17,15 +17,18 @@ Created by Jeppe Sverdrup
 
 ## What It Does
 
-WhisperX is a command-line tool that turns audio files into text. It runs locally on your machine using [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (no cloud required for transcription and translation), and optionally connects to the OpenAI API for speaker diarization.
+WhisperX is a command-line tool that turns audio files into text. It runs locally on your machine using [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (no cloud required for transcription and translation), and optionally connects to the OpenAI API for speaker diarization or the ElevenLabs API for advanced speech-to-text.
 
-### Three Modes
+The local Whisper model is only loaded when you choose Transcribe or Translate, so API-only modes (`d`, `e`) start instantly without waiting for the model to load.
+
+### Four Modes
 
 | Mode | Key | Description |
 |------|-----|-------------|
 | **Transcribe** | `Enter` | Transcribes audio and keeps the original language |
 | **Translate** | `t` | Transcribes audio and translates it into English |
 | **Diarize** | `d` | Transcribes audio and identifies who said what (requires OpenAI API key) |
+| **ElevenLabs Scribe** | `e` | Advanced cloud STT with diarization, PII redaction, and more (requires ElevenLabs API key) |
 
 ### Output Files
 
@@ -42,13 +45,15 @@ For every audio file processed, WhisperX saves two output files next to the inpu
 - [faster-whisper](https://github.com/SYSTRAN/faster-whisper)
 - [openai](https://pypi.org/project/openai/) Python SDK
 - [pydub](https://pypi.org/project/pydub/)
+- [requests](https://pypi.org/project/requests/)
 - [ffmpeg](https://ffmpeg.org/) (required by pydub for audio processing)
 - An OpenAI API key *(only required for Diarize mode)*
+- An ElevenLabs API key *(only required for ElevenLabs Scribe mode)*
 
 ### Install dependencies
 
 ```bash
-pip install faster-whisper openai pydub
+pip install faster-whisper openai pydub requests
 ```
 
 > **ffmpeg** must also be installed and available on your system PATH. Download it from [ffmpeg.org](https://ffmpeg.org/download.html).
@@ -65,10 +70,11 @@ pip install faster-whisper openai pydub
 
 2. **Install dependencies** (see above)
 
-3. **Add your OpenAI API key** *(only needed for Diarize mode)*:
-   Open `whisperx.py` and replace the placeholder on line 12:
+3. **Add your API key(s)**:
+   Open `whisperx.py` and replace the placeholder(s) near the top of the file:
    ```python
-   OPENAI_API_KEY = "YOUR_API_KEY_HERE"  # <-- Paste your key here
+   OPENAI_API_KEY = "YOUR_API_KEY_HERE"      # <-- needed for Diarize mode
+   ELEVENLABS_API_KEY = "YOUR_API_KEY_HERE"  # <-- needed for ElevenLabs Scribe mode
    ```
 
 ---
@@ -90,9 +96,9 @@ Edit `whisperx.bat` to point to your Python installation and script location, th
 ### Workflow
 
 1. Launch the tool
-2. Select a Whisper model (or press Enter for the default: `medium`)
-3. Drag and drop an audio file into the terminal window
-4. Choose your mode: Transcribe, Translate, or Diarize
+2. Drag and drop an audio file into the terminal window
+3. Choose your mode: Transcribe, Translate, Diarize, or ElevenLabs Scribe
+4. **Transcribe / Translate only:** Select a Whisper model (or press Enter for the default: `medium`). The model loads on first use and is cached for the rest of the session.
 5. Output files are saved next to your audio file automatically
 
 ---
@@ -110,7 +116,27 @@ WhisperX supports all standard Whisper model sizes. Larger models are more accur
 | `large-v1/v2/v3` | ~1.5B params | Best accuracy, slowest |
 | `large-v3-turbo` | ~809M params | Fast large model |
 
-All models run **locally on CPU** — no internet connection required for Transcribe and Translate modes.
+All models run **locally on CPU** — no internet connection required for Transcribe and Translate modes. The model is only loaded when you first choose Transcribe or Translate, so API-only modes (`d`, `e`) skip the model load entirely.
+
+---
+
+## ElevenLabs Scribe Mode (Advanced Cloud STT)
+
+ElevenLabs Scribe mode sends your audio to the [ElevenLabs Speech-to-Text API](https://elevenlabs.io/docs/api-reference/speech-to-text) (`scribe_v2` model) and offers five sub-options:
+
+| Option | Feature |
+|--------|---------|
+| **[1] Quick transcribe** | Auto-detect language, word timestamps, audio event tags |
+| **[2] + Diarize** | Speaker identification (up to 32 speakers) |
+| **[3] + Clean** | `no_verbatim` mode — strips filler words and false starts |
+| **[4] + Redact PII** | Detects & masks names, SSNs, credit cards, medical data, and more |
+| **[5] Custom** | Configure language, diarization, cleaning, events, PII, timestamp granularity, and key terms |
+
+- Requires a valid ElevenLabs API key set in `whisperx.py`
+- Uses raw HTTP requests (no ElevenLabs SDK needed)
+- Output labels speakers as `speaker_0`, `speaker_1`, etc. (when diarization is enabled)
+
+**Cost:** ElevenLabs Scribe mode makes API calls to ElevenLabs and will incur usage costs depending on audio length.
 
 ---
 
