@@ -8,7 +8,7 @@ from pydub import AudioSegment
 
 # --- CONFIGURATION ---
 DEFAULT_MODEL = "medium"
-VERSION = "1.0"
+VERSION = "1.4"
 AVAILABLE_MODELS = ["tiny", "base", "small", "medium", "large-v1", "large-v2", "large-v3", "large-v3-turbo"]
 OPENAI_API_KEY = "YOUR_API_KEY_HERE"  # <-- Paste your OpenAI API key here (only needed for Diarize mode)
 ELEVENLABS_API_KEY = "YOUR_API_KEY_HERE"  # <-- Paste your ElevenLabs API key here (only needed for ElevenLabs mode)
@@ -172,76 +172,130 @@ def main():
                 continue
 
             print("\nElevenLabs Scribe Options:")
-            print("   [1] Quick transcribe (auto-detect language)")
-            print("   [2] Transcribe + Diarize (identify speakers)")
-            print("   [3] Transcribe + Clean (no filler words)")
-            print("   [4] Transcribe + Redact PII (mask sensitive data)")
-            print("   [5] Custom (configure all options)")
-            el_choice = input("Selection [1-5]: ").strip()
+            print("   [1] Fast track (English, diarize, clean, word timestamps)")
+            print("   [2] Custom (configure all available Scribe options)")
+            el_choice = input("Selection [1-2, Enter=1]: ").strip()
+            if el_choice == "":
+                el_choice = "1"
 
             # Defaults
+            el_model_id = "scribe_v2"
             el_diarize = False
             el_num_speakers = None
+            el_diarization_threshold = None
             el_tag_events = True
             el_no_verbatim = False
             el_entity_detection = None
             el_entity_redaction = None
+            el_entity_redaction_mode = None
             el_language = None
             el_keyterms = None
             el_timestamps = "word"
+            el_temperature = None
+            el_seed = None
+            el_use_multi_channel = False
+            el_detect_speaker_roles = False
+            el_enable_logging = True
 
-            if el_choice == "2":
+            if el_choice == "1":
+                el_language = "en"
                 el_diarize = True
-                speakers = input("Max number of speakers (Enter to auto-detect): ").strip()
-                if speakers.isdigit() and 1 <= int(speakers) <= 32:
-                    el_num_speakers = int(speakers)
-            elif el_choice == "3":
                 el_no_verbatim = True
-            elif el_choice == "4":
-                el_entity_detection = "all"
-                el_entity_redaction = "all"
-                print("PII redaction enabled (names, SSNs, credit cards, medical data, etc.)")
-            elif el_choice == "5":
+                el_tag_events = False
+                el_timestamps = "word"
+                print("Fast track enabled: English, diarization with auto speakers, filler removal, no event tags, word timestamps.")
+            elif el_choice == "2":
                 # Custom configuration
+                model_choice = input("Model ID (scribe_v2/scribe_v1) [scribe_v2]: ").strip().lower()
+                if model_choice in ("scribe_v1", "scribe_v2"):
+                    el_model_id = model_choice
+
                 lang = input("Language code (e.g. 'en', 'no', or Enter for auto-detect): ").strip()
                 if lang:
                     el_language = lang
+
+                ts = input("Timestamp granularity (word/character/none) [word]: ").strip().lower()
+                if ts in ("character", "none"):
+                    el_timestamps = ts
 
                 if input("Enable diarization? (y/N): ").strip().lower() == 'y':
                     el_diarize = True
                     speakers = input("  Max speakers (Enter for auto): ").strip()
                     if speakers.isdigit() and 1 <= int(speakers) <= 32:
                         el_num_speakers = int(speakers)
+                    else:
+                        threshold = input("  Diarization threshold 0.1-0.4 (Enter for API default): ").strip()
+                        try:
+                            threshold_value = float(threshold)
+                            if 0.1 <= threshold_value <= 0.4:
+                                el_diarization_threshold = threshold_value
+                        except ValueError:
+                            pass
 
-                if input("Remove filler words? (y/N): ").strip().lower() == 'y':
+                    if input("  Detect speaker roles, agent/customer? (y/N): ").strip().lower() == 'y':
+                        el_detect_speaker_roles = True
+
+                if input("Use multi-channel transcription? (y/N): ").strip().lower() == 'y':
+                    el_use_multi_channel = True
+                    if el_detect_speaker_roles:
+                        print("Speaker-role detection is not available with multi-channel; disabling speaker roles.")
+                        el_detect_speaker_roles = False
+
+                if el_model_id == "scribe_v2" and input("Remove filler words? (y/N): ").strip().lower() == 'y':
                     el_no_verbatim = True
 
                 if input("Tag audio events (laughter, applause, etc.)? (Y/n): ").strip().lower() == 'n':
                     el_tag_events = False
 
-                if input("Detect & redact PII? (y/N): ").strip().lower() == 'y':
-                    el_entity_detection = "all"
-                    el_entity_redaction = "all"
-
-                ts = input("Timestamp granularity (word/character/none) [word]: ").strip().lower()
-                if ts in ("character", "none"):
-                    el_timestamps = ts
+                entity_detection = input("Entity detection (all/pii/phi/pci/other/offensive_language, or Enter for none): ").strip()
+                if entity_detection:
+                    el_entity_detection = entity_detection
+                    entity_redaction = input("Entity redaction (same scope, or Enter for detect only): ").strip()
+                    if entity_redaction:
+                        el_entity_redaction = entity_redaction
+                        redaction_mode = input("Redaction mode (redacted/entity_type/enumerated_entity_type) [enumerated_entity_type]: ").strip()
+                        if redaction_mode in ("redacted", "entity_type", "enumerated_entity_type"):
+                            el_entity_redaction_mode = redaction_mode
 
                 terms = input("Key terms to boost (comma-separated, or Enter to skip): ").strip()
                 if terms:
-                    el_keyterms = [t.strip() for t in terms.split(",") if t.strip()][:100]
+                    el_keyterms = [t.strip() for t in terms.split(",") if t.strip()][:1000]
+
+                temperature = input("Temperature 0-2 (Enter for API default): ").strip()
+                try:
+                    temperature_value = float(temperature)
+                    if 0 <= temperature_value <= 2:
+                        el_temperature = temperature_value
+                except ValueError:
+                    pass
+
+                seed = input("Seed 0-2147483647 (Enter for none): ").strip()
+                if seed.isdigit() and 0 <= int(seed) <= 2147483647:
+                    el_seed = int(seed)
+
+                if input("Enable ElevenLabs logging/storage? (Y/n): ").strip().lower() == 'n':
+                    el_enable_logging = False
+            else:
+                print("Invalid selection. Using fast track.")
+                el_language = "en"
+                el_diarize = True
+                el_no_verbatim = True
+                el_tag_events = False
+                el_timestamps = "word"
 
             # Build the request
             print(f"\n---> Transcribing '{os.path.basename(user_input)}' via ElevenLabs Scribe...")
             start_time = time.time()
 
             headers = {"xi-api-key": ELEVENLABS_API_KEY}
-            data = {"model_id": "scribe_v2"}
+            data = {"model_id": el_model_id}
 
             if el_diarize:
                 data["diarize"] = "true"
             if el_num_speakers:
                 data["num_speakers"] = str(el_num_speakers)
+            if el_diarization_threshold is not None:
+                data["diarization_threshold"] = str(el_diarization_threshold)
             if el_tag_events:
                 data["tag_audio_events"] = "true"
             else:
@@ -256,6 +310,16 @@ def main():
                 data["entity_detection"] = el_entity_detection
             if el_entity_redaction:
                 data["entity_redaction"] = el_entity_redaction
+            if el_entity_redaction_mode:
+                data["entity_redaction_mode"] = el_entity_redaction_mode
+            if el_temperature is not None:
+                data["temperature"] = str(el_temperature)
+            if el_seed is not None:
+                data["seed"] = str(el_seed)
+            if el_use_multi_channel:
+                data["use_multi_channel"] = "true"
+            if el_detect_speaker_roles:
+                data["detect_speaker_roles"] = "true"
             if el_keyterms:
                 # Use list of tuples to support multiple values for the same key
                 data_tuples = list(data.items())
@@ -265,7 +329,8 @@ def main():
 
             with open(user_input, "rb") as audio_file:
                 files = {"file": (os.path.basename(user_input), audio_file)}
-                response = requests.post(ELEVENLABS_STT_URL, headers=headers, data=data, files=files)
+                params = {"enable_logging": str(el_enable_logging).lower()}
+                response = requests.post(ELEVENLABS_STT_URL, headers=headers, params=params, data=data, files=files)
 
             if response.status_code != 200:
                 print(f"\nError from ElevenLabs API ({response.status_code}):")
@@ -273,6 +338,37 @@ def main():
                 continue
 
             result = response.json()
+
+            transcripts = result.get("transcripts")
+            if transcripts:
+                transcript_items = transcripts.items() if isinstance(transcripts, dict) else enumerate(transcripts)
+                channel_texts = []
+                combined_words = []
+                combined_entities = []
+                language = "unknown"
+                lang_prob = 0
+
+                for channel, transcript in transcript_items:
+                    channel_label = f"channel_{channel}"
+                    channel_text = transcript.get("text", "")
+                    if channel_text:
+                        channel_texts.append(f"{channel_label}: {channel_text}")
+
+                    if language == "unknown":
+                        language = transcript.get("language_code", "unknown")
+                        lang_prob = transcript.get("language_probability", 0)
+
+                    for word in transcript.get("words", []):
+                        word["channel_index"] = channel
+                        combined_words.append(word)
+
+                    combined_entities.extend(transcript.get("entities", []))
+
+                result["language_code"] = language
+                result["language_probability"] = lang_prob
+                result["text"] = "\n\n".join(channel_texts)
+                result["words"] = combined_words
+                result["entities"] = combined_entities
 
             # Extract data
             language = result.get("language_code", "unknown")
