@@ -221,7 +221,9 @@ def main():
                 if input("Enable diarization? (y/N): ").strip().lower() == 'y':
                     el_diarize = True
                     speakers = input("  Max speakers (Enter for auto): ").strip()
-                    if speakers.isdigit() and 1 <= int(speakers) <= 32:
+                    if speakers == "":
+                        pass
+                    elif speakers.isdigit() and 1 <= int(speakers) <= 32:
                         el_num_speakers = int(speakers)
                     else:
                         threshold = input("  Diarization threshold 0.1-0.4 (Enter for API default): ").strip()
