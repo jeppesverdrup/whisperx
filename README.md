@@ -122,17 +122,15 @@ All models run **locally on CPU** — no internet connection required for Transc
 
 ## ElevenLabs Scribe Mode (Advanced Cloud STT)
 
-ElevenLabs Scribe mode sends your audio to the [ElevenLabs Speech-to-Text API](https://elevenlabs.io/docs/api-reference/speech-to-text) (`scribe_v2` model) and offers five sub-options:
+ElevenLabs Scribe mode sends your audio to the [ElevenLabs Speech-to-Text API](https://elevenlabs.io/docs/api-reference/speech-to-text) (`scribe_v2` model) and offers two sub-options:
 
 | Option | Feature |
 |--------|---------|
-| **[1] Quick transcribe** | Auto-detect language, word timestamps, audio event tags |
-| **[2] + Diarize** | Speaker identification (up to 32 speakers) |
-| **[3] + Clean** | `no_verbatim` mode — strips filler words and false starts |
-| **[4] + Redact PII** | Detects & masks names, SSNs, credit cards, medical data, and more |
-| **[5] Custom** | Configure language, diarization, cleaning, events, PII, timestamp granularity, and key terms |
+| **[1] Fast track** | English transcription with diarization, auto speaker detection, filler removal, no audio event tags, no PII redaction, and word timestamps |
+| **[2] Custom** | Configure model, language, timestamps, diarization, speaker roles, multi-channel transcription, cleaning, audio events, entity detection/redaction, key terms, temperature, seed, and logging |
 
 - Requires a valid ElevenLabs API key set in `whisperx.py`
+- Pressing Enter at the ElevenLabs submenu selects **Fast track**
 - Uses raw HTTP requests (no ElevenLabs SDK needed)
 - Output labels speakers as `speaker_0`, `speaker_1`, etc. (when diarization is enabled)
 
