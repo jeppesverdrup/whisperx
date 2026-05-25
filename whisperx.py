@@ -366,6 +366,7 @@ def main():
 
                     combined_entities.extend(transcript.get("entities", []))
 
+                combined_words.sort(key=lambda word: (word.get("start", 0), word.get("end", 0)))
                 result["language_code"] = language
                 result["language_probability"] = lang_prob
                 result["text"] = "\n\n".join(channel_texts)
