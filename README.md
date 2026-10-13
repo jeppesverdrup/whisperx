@@ -158,7 +158,9 @@ GPT Transcribe mode sends your audio to OpenAI's `gpt-transcribe` model through 
 
 - Requires a valid OpenAI API key set in `whisperx.py`
 - Audio is converted to compressed mono chunks of ~2 minutes, cut at quiet moments
-- The model returns text only (no timestamps, no speakers), so `_log.txt` is timestamped per chunk
+- The model returns text only (no timestamps, no speakers), so `_log.txt` is timestamped per chunk and `_clean.txt` has one paragraph per chunk
+- You are asked for **key terms** (names, product and jargon words, comma-separated). They are sent as `keywords` and make spellings consistent across chunks, e.g. so a name isn't written three different ways in one recording. Press Enter to skip
+- Terms you always want can be set once in `GPT_TRANSCRIBE_KEYWORDS` at the top of `whisperx.py`; terms typed at the prompt are added to them
 - Output files are named `<audio>_gpt-transcribe_log.txt` and `<audio>_gpt-transcribe_clean.txt`
 - Use Diarize (`d`) when you need speaker labels
 
