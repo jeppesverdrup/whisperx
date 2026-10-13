@@ -1,18 +1,22 @@
 import os
 import time
 import tempfile
+import subprocess
 import requests
 from faster_whisper import WhisperModel
-from openai import OpenAI
+from openai import OpenAI, OpenAIError
 from pydub import AudioSegment
 
 # --- CONFIGURATION ---
 DEFAULT_MODEL = "medium"
-VERSION = "1.4"
+VERSION = "1.5"
 AVAILABLE_MODELS = ["tiny", "base", "small", "medium", "large-v1", "large-v2", "large-v3", "large-v3-turbo"]
-OPENAI_API_KEY = "YOUR_API_KEY_HERE"  # <-- Paste your OpenAI API key here (only needed for Diarize mode)
+OPENAI_API_KEY = "YOUR_API_KEY_HERE"  # <-- Paste your OpenAI API key here (needed for Diarize and GPT Transcribe modes)
 ELEVENLABS_API_KEY = "YOUR_API_KEY_HERE"  # <-- Paste your ElevenLabs API key here (only needed for ElevenLabs mode)
 MAX_CHUNK_SECONDS = 1200  # OpenAI limit is 1500s; use 1200s (20 min) for safety margin
+GPT_TRANSCRIBE_CHUNK_SECONDS = 120  # gpt-transcribe returns no timestamps, so chunk length sets log granularity
+OPENAI_MAX_UPLOAD_BYTES = 25 * 1024 * 1024  # OpenAI audio upload limit
+OPENAI_CHUNK_BITRATE = "48k"  # mono 16 kHz speech; ~6 KB/s so a 20 min chunk is ~7 MB
 ELEVENLABS_STT_URL = "https://api.elevenlabs.io/v1/speech-to-text"
 # ---------------------
 
@@ -24,6 +28,62 @@ LOGO = r"""
     \_/\_/  |_| |_|_|___/ .__/ \___|_|  /_/\_\
                         |_|
 """
+
+def load_audio_mono(path):
+    """Decode to mono 16 kHz inside ffmpeg so long stereo recordings stay small in memory."""
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+        tmp_path = tmp.name
+    try:
+        result = subprocess.run(
+            [AudioSegment.converter, "-y", "-v", "error", "-i", path, "-vn", "-ac", "1", "-ar", "16000", tmp_path],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            raise ValueError(f"ffmpeg could not decode the file: {result.stderr.strip()}")
+        return AudioSegment.from_wav(tmp_path)
+    finally:
+        os.remove(tmp_path)
+
+
+def quietest_offset_ms(window, step_ms=100):
+    """Offset (ms) of the quietest slice in an audio window, used to cut between words."""
+    best_offset, best_rms = 0, None
+    for offset in range(0, max(len(window) - step_ms, 1), step_ms):
+        rms = window[offset:offset + step_ms].rms
+        if best_rms is None or rms < best_rms:
+            best_offset, best_rms = offset, rms
+    return best_offset + step_ms // 2
+
+
+def plan_chunks(audio, target_s, search_s=15):
+    """Split points as (start_ms, end_ms) pairs, cutting at the quietest moment near each target length."""
+    target_ms = target_s * 1000
+    search_ms = search_s * 1000
+    bounds = []
+    start = 0
+    while len(audio) - start > target_ms + search_ms:
+        window_start = start + target_ms - search_ms
+        cut = window_start + quietest_offset_ms(audio[window_start:start + target_ms])
+        bounds.append((start, cut))
+        start = cut
+    bounds.append((start, len(audio)))
+    return bounds
+
+
+def iter_chunks(audio, bounds):
+    """Yield (index, total, start_s, end_s, mp3_path) per chunk; the temp file is removed afterwards."""
+    for i, (start_ms, end_ms) in enumerate(bounds):
+        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
+            tmp_path = tmp.name
+        try:
+            audio[start_ms:end_ms].export(tmp_path, format="mp3", bitrate=OPENAI_CHUNK_BITRATE)
+            size = os.path.getsize(tmp_path)
+            if size > OPENAI_MAX_UPLOAD_BYTES:
+                raise ValueError(f"Chunk is {size / 1048576:.1f} MB, over the 25 MB upload limit.")
+            yield i, len(bounds), start_ms / 1000.0, end_ms / 1000.0, tmp_path
+        finally:
+            os.remove(tmp_path)
+
 
 def main():
     print(LOGO)
@@ -51,6 +111,7 @@ def main():
         print("   [  t  ] = Translate (Audio -> English Text)")
         print("   [  d  ] = Diarize (Identify speakers via OpenAI API)")
         print("   [  e  ] = ElevenLabs Scribe (Advanced STT via ElevenLabs API)")
+        print("   [  g  ] = GPT Transcribe (Cloud STT via OpenAI API, no speakers)")
         mode_input = input("Selection: ").strip().lower()
 
         if mode_input == 'd':
@@ -65,65 +126,51 @@ def main():
 
             client = OpenAI(api_key=OPENAI_API_KEY)
 
-            # Load audio to check duration and split if needed
-            audio = AudioSegment.from_file(user_input)
+            # Decode, then split at quiet points into compressed chunks that fit the upload limit
+            try:
+                audio = load_audio_mono(user_input)
+            except ValueError as e:
+                print(f"\nError: {e}")
+                continue
             audio_duration_s = len(audio) / 1000.0
-            chunk_ms = MAX_CHUNK_SECONDS * 1000
+            bounds = plan_chunks(audio, MAX_CHUNK_SECONDS)
+
+            if len(bounds) == 1:
+                print(f"Audio duration: {audio_duration_s:.0f}s (within API limit)")
+            else:
+                print(f"Audio duration: {audio_duration_s:.0f}s (exceeds API limit of {MAX_CHUNK_SECONDS}s)")
+                print(f"Splitting into {len(bounds)} chunks of ~{MAX_CHUNK_SECONDS}s each...")
 
             all_segments = []
 
-            if audio_duration_s <= MAX_CHUNK_SECONDS:
-                # Short enough — send directly
-                print(f"Audio duration: {audio_duration_s:.0f}s (within API limit)")
-                with open(user_input, "rb") as audio_file:
-                    transcript = client.audio.transcriptions.create(
-                        file=audio_file,
-                        model="gpt-4o-transcribe-diarize",
-                        response_format="diarized_json",
-                        chunking_strategy="auto",
-                    )
-                all_segments = transcript.to_dict().get("segments", [])
-            else:
-                # Too long — split into chunks
-                num_chunks = -(-len(audio) // chunk_ms)  # ceiling division
-                print(f"Audio duration: {audio_duration_s:.0f}s (exceeds API limit of {MAX_CHUNK_SECONDS}s)")
-                print(f"Splitting into {num_chunks} chunks of ~{MAX_CHUNK_SECONDS}s each...")
+            try:
+                for i, total, chunk_start_s, chunk_end_s, tmp_path in iter_chunks(audio, bounds):
+                    if total > 1:
+                        print(f"\n  Chunk {i + 1}/{total} [{chunk_start_s:.0f}s - {chunk_end_s:.0f}s]...", end=" ", flush=True)
 
-                for i in range(num_chunks):
-                    chunk_start_ms = i * chunk_ms
-                    chunk_end_ms = min((i + 1) * chunk_ms, len(audio))
-                    chunk = audio[chunk_start_ms:chunk_end_ms]
-                    time_offset_s = chunk_start_ms / 1000.0
+                    with open(tmp_path, "rb") as audio_file:
+                        transcript = client.audio.transcriptions.create(
+                            file=audio_file,
+                            model="gpt-4o-transcribe-diarize",
+                            response_format="diarized_json",
+                            chunking_strategy="auto",
+                        )
 
-                    print(f"\n  Chunk {i + 1}/{num_chunks} [{chunk_start_ms / 1000:.0f}s - {chunk_end_ms / 1000:.0f}s]...", end=" ", flush=True)
+                    chunk_segments = transcript.to_dict().get("segments", [])
 
-                    # Export chunk to a temp WAV file
-                    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-                        tmp_path = tmp.name
-                        chunk.export(tmp_path, format="wav")
+                    # Offset timestamps to reflect position in the full audio
+                    for seg in chunk_segments:
+                        seg["start"] = seg.get("start", 0) + chunk_start_s
+                        seg["end"] = seg.get("end", 0) + chunk_start_s
+                        all_segments.append(seg)
 
-                    try:
-                        with open(tmp_path, "rb") as audio_file:
-                            transcript = client.audio.transcriptions.create(
-                                file=audio_file,
-                                model="gpt-4o-transcribe-diarize",
-                                response_format="diarized_json",
-                                chunking_strategy="auto",
-                            )
-
-                        chunk_segments = transcript.to_dict().get("segments", [])
-
-                        # Offset timestamps to reflect position in the full audio
-                        for seg in chunk_segments:
-                            seg["start"] = seg.get("start", 0) + time_offset_s
-                            seg["end"] = seg.get("end", 0) + time_offset_s
-                            all_segments.append(seg)
-
+                    if total > 1:
                         print(f"OK ({len(chunk_segments)} segments)")
-                    finally:
-                        os.remove(tmp_path)
+            except (OpenAIError, ValueError) as e:
+                print(f"\nError from OpenAI API: {e}")
+                continue
 
-                print()
+            print()
 
             # Save the files
             file_base = f"{user_input}_diarize"
@@ -157,6 +204,75 @@ def main():
 
                     # Live Preview
                     print(f"  {speaker} {timestamp} {text}")
+
+            duration = time.time() - start_time
+            print("-" * 50)
+            print(f"DONE! ({duration:.1f}s)")
+            print(f"1. Log:   {os.path.basename(file_log)}")
+            print(f"2. Clean: {os.path.basename(file_clean)}")
+
+        elif mode_input == 'g':
+            # --- GPT Transcribe via OpenAI API ---
+            if OPENAI_API_KEY == "YOUR_API_KEY_HERE":
+                print("\nError: OpenAI API key not configured!")
+                print("Set OPENAI_API_KEY in whisperx.py to use GPT Transcribe.")
+                continue
+
+            print(f"\n---> Transcribing '{os.path.basename(user_input)}' via OpenAI gpt-transcribe...")
+            start_time = time.time()
+
+            client = OpenAI(api_key=OPENAI_API_KEY)
+
+            try:
+                audio = load_audio_mono(user_input)
+            except ValueError as e:
+                print(f"\nError: {e}")
+                continue
+            bounds = plan_chunks(audio, GPT_TRANSCRIBE_CHUNK_SECONDS)
+            print(f"Audio duration: {len(audio) / 1000.0:.0f}s, sending {len(bounds)} chunk(s) of ~{GPT_TRANSCRIBE_CHUNK_SECONDS}s...")
+
+            # gpt-transcribe returns text only (no timestamps), so the log is timestamped per chunk
+            chunk_results = []
+            languages = []
+
+            try:
+                for i, total, chunk_start_s, chunk_end_s, tmp_path in iter_chunks(audio, bounds):
+                    print(f"  Chunk {i + 1}/{total} [{chunk_start_s:.0f}s - {chunk_end_s:.0f}s]...", end=" ", flush=True)
+
+                    with open(tmp_path, "rb") as audio_file:
+                        transcript = client.audio.transcriptions.create(
+                            file=audio_file,
+                            model="gpt-transcribe",
+                            response_format="json",
+                        )
+
+                    result = transcript.to_dict()
+                    chunk_results.append((chunk_start_s, chunk_end_s, result.get("text", "").strip()))
+                    for lang in result.get("languages") or []:
+                        code = lang.get("code")
+                        if code and code not in languages:
+                            languages.append(code)
+                    print("OK")
+            except (OpenAIError, ValueError) as e:
+                print(f"\nError from OpenAI API: {e}")
+                continue
+
+            file_base = f"{user_input}_gpt-transcribe"
+            file_log = file_base + "_log.txt"
+            file_clean = file_base + "_clean.txt"
+
+            with open(file_log, "w", encoding="utf-8") as f_log, \
+                 open(file_clean, "w", encoding="utf-8") as f_clean:
+
+                if languages:
+                    print(f"Detected language(s): {', '.join(code.upper() for code in languages)}")
+                print("-" * 50)
+
+                for start, end, text in chunk_results:
+                    timestamp = f"[{start:.2f}s -> {end:.2f}s]"
+                    f_log.write(f"{timestamp} {text}\n")
+                    f_clean.write(text + " ")
+                    print(f"  {timestamp} {text}")
 
             duration = time.time() - start_time
             print("-" * 50)
