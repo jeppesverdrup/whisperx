@@ -9,7 +9,7 @@
                         |_|
 ```
 
-**A simple audio transcription tool with four modes: Transcribe, Translate, Diarize, and ElevenLabs Scribe.**
+**A simple audio transcription tool with five modes: Transcribe, Translate, Diarize, ElevenLabs Scribe, and GPT Transcribe.**
 
 Created by Jeppe Sverdrup
 
@@ -17,11 +17,11 @@ Created by Jeppe Sverdrup
 
 ## What It Does
 
-WhisperX is a command-line tool that turns audio files into text. It runs locally on your machine using [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (no cloud required for transcription and translation), and optionally connects to the OpenAI API for speaker diarization or the ElevenLabs API for advanced speech-to-text.
+WhisperX is a command-line tool that turns audio files into text. It runs locally on your machine using [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (no cloud required for transcription and translation), and optionally connects to the OpenAI API for speaker diarization or cloud transcription, or the ElevenLabs API for advanced speech-to-text.
 
-The local Whisper model is only loaded when you choose Transcribe or Translate, so API-only modes (`d`, `e`) start instantly without waiting for the model to load.
+The local Whisper model is only loaded when you choose Transcribe or Translate, so API-only modes (`d`, `e`, `g`) start instantly without waiting for the model to load.
 
-### Four Modes
+### Five Modes
 
 | Mode | Key | Description |
 |------|-----|-------------|
@@ -29,12 +29,13 @@ The local Whisper model is only loaded when you choose Transcribe or Translate, 
 | **Translate** | `t` | Transcribes audio and translates it into English |
 | **Diarize** | `d` | Transcribes audio and identifies who said what (requires OpenAI API key) |
 | **ElevenLabs Scribe** | `e` | Advanced cloud STT with diarization, PII redaction, and more (requires ElevenLabs API key) |
+| **GPT Transcribe** | `g` | Cloud transcription with OpenAI `gpt-transcribe`, no speaker labels (requires OpenAI API key) |
 
 ### Output Files
 
 For every audio file processed, WhisperX saves two output files next to the input file:
 
-- **`_log.txt`** — Full transcript with timestamps for every segment
+- **`_log.txt`** — Full transcript with timestamps for every segment (GPT Transcribe mode timestamps each ~2 minute chunk, since the model returns text only)
 - **`_clean.txt`** — Clean transcript with text only (no timestamps), easy to copy and paste
 
 ---
@@ -47,7 +48,7 @@ For every audio file processed, WhisperX saves two output files next to the inpu
 - [pydub](https://pypi.org/project/pydub/)
 - [requests](https://pypi.org/project/requests/)
 - [ffmpeg](https://ffmpeg.org/) (required by pydub for audio processing)
-- An OpenAI API key *(only required for Diarize mode)*
+- An OpenAI API key *(only required for Diarize and GPT Transcribe modes)*
 - An ElevenLabs API key *(only required for ElevenLabs Scribe mode)*
 
 ### Install dependencies
@@ -73,7 +74,7 @@ pip install faster-whisper openai pydub requests
 3. **Add your API key(s)**:
    Open `whisperx.py` and replace the placeholder(s) near the top of the file:
    ```python
-   OPENAI_API_KEY = "YOUR_API_KEY_HERE"      # <-- needed for Diarize mode
+   OPENAI_API_KEY = "YOUR_API_KEY_HERE"      # <-- needed for Diarize and GPT Transcribe modes
    ELEVENLABS_API_KEY = "YOUR_API_KEY_HERE"  # <-- needed for ElevenLabs Scribe mode
    ```
 
@@ -97,7 +98,7 @@ Edit `whisperx.bat` to point to your Python installation and script location, th
 
 1. Launch the tool
 2. Drag and drop an audio file into the terminal window
-3. Choose your mode: Transcribe, Translate, Diarize, or ElevenLabs Scribe
+3. Choose your mode: Transcribe, Translate, Diarize, ElevenLabs Scribe, or GPT Transcribe
 4. **Transcribe / Translate only:** Select a Whisper model (or press Enter for the default: `medium`). The model loads on first use and is cached for the rest of the session.
 5. Output files are saved next to your audio file automatically
 
@@ -116,7 +117,7 @@ WhisperX supports all standard Whisper model sizes. Larger models are more accur
 | `large-v1/v2/v3` | ~1.5B params | Best accuracy, slowest |
 | `large-v3-turbo` | ~809M params | Fast large model |
 
-All models run **locally on CPU** — no internet connection required for Transcribe and Translate modes. The model is only loaded when you first choose Transcribe or Translate, so API-only modes (`d`, `e`) skip the model load entirely.
+All models run **locally on CPU** — no internet connection required for Transcribe and Translate modes. The model is only loaded when you first choose Transcribe or Translate, so API-only modes (`d`, `e`, `g`) skip the model load entirely.
 
 ---
 
@@ -143,10 +144,25 @@ ElevenLabs Scribe mode sends your audio to the [ElevenLabs Speech-to-Text API](h
 Diarize mode uses OpenAI's `gpt-4o-transcribe-diarize` API to identify and label individual speakers in the audio.
 
 - Requires a valid OpenAI API key set in `whisperx.py`
-- Audio longer than 20 minutes is automatically split into chunks and stitched back together
+- Audio is converted to compressed mono 16 kHz chunks (OpenAI limits uploads to 25 MB), split at quiet moments, and stitched back together
+- Chunks are up to ~20 minutes; speaker labels are assigned per chunk, so they are not guaranteed to match across chunks
 - Output labels speakers as `speaker_0`, `speaker_1`, etc.
 
 **Cost:** Diarize mode makes API calls to OpenAI and will incur usage costs depending on audio length.
+
+---
+
+## GPT Transcribe Mode (Cloud STT)
+
+GPT Transcribe mode sends your audio to OpenAI's `gpt-transcribe` model through the same transcription endpoint and API key as Diarize mode.
+
+- Requires a valid OpenAI API key set in `whisperx.py`
+- Audio is converted to compressed mono chunks of ~2 minutes, cut at quiet moments
+- The model returns text only (no timestamps, no speakers), so `_log.txt` is timestamped per chunk
+- Output files are named `<audio>_gpt-transcribe_log.txt` and `<audio>_gpt-transcribe_clean.txt`
+- Use Diarize (`d`) when you need speaker labels
+
+**Cost:** GPT Transcribe mode makes API calls to OpenAI and will incur usage costs depending on audio length.
 
 ---
 
