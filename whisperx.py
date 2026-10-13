@@ -15,6 +15,7 @@ OPENAI_API_KEY = "YOUR_API_KEY_HERE"  # <-- Paste your OpenAI API key here (need
 ELEVENLABS_API_KEY = "YOUR_API_KEY_HERE"  # <-- Paste your ElevenLabs API key here (only needed for ElevenLabs mode)
 MAX_CHUNK_SECONDS = 1200  # OpenAI limit is 1500s; use 1200s (20 min) for safety margin
 GPT_TRANSCRIBE_CHUNK_SECONDS = 120  # gpt-transcribe returns no timestamps, so chunk length sets log granularity
+GPT_TRANSCRIBE_KEYWORDS = []  # <-- Names/terms always sent to GPT Transcribe, e.g. ["Trond", "EDW"]; more can be added per run
 OPENAI_MAX_UPLOAD_BYTES = 25 * 1024 * 1024  # OpenAI audio upload limit
 OPENAI_CHUNK_BITRATE = "48k"  # mono 16 kHz speech; ~6 KB/s so a 20 min chunk is ~7 MB
 ELEVENLABS_STT_URL = "https://api.elevenlabs.io/v1/speech-to-text"
@@ -218,7 +219,16 @@ def main():
                 print("Set OPENAI_API_KEY in whisperx.py to use GPT Transcribe.")
                 continue
 
+            # Key terms keep names and jargon spelled the same in every chunk
+            keywords = list(GPT_TRANSCRIBE_KEYWORDS)
+            default_note = f"Enter to use the {len(keywords)} default(s)" if keywords else "Enter to skip"
+            terms = input(f"\nKey terms/names to boost (comma-separated, {default_note}): ").strip()
+            keywords += [t.strip() for t in terms.split(",") if t.strip()]
+            extra_body = {"keywords": keywords} if keywords else None
+
             print(f"\n---> Transcribing '{os.path.basename(user_input)}' via OpenAI gpt-transcribe...")
+            if keywords:
+                print(f"Using {len(keywords)} key term(s).")
             start_time = time.time()
 
             client = OpenAI(api_key=OPENAI_API_KEY)
@@ -244,6 +254,7 @@ def main():
                             file=audio_file,
                             model="gpt-transcribe",
                             response_format="json",
+                            extra_body=extra_body,
                         )
 
                     result = transcript.to_dict()
@@ -271,8 +282,10 @@ def main():
                 for start, end, text in chunk_results:
                     timestamp = f"[{start:.2f}s -> {end:.2f}s]"
                     f_log.write(f"{timestamp} {text}\n")
-                    f_clean.write(text + " ")
                     print(f"  {timestamp} {text}")
+
+                # One paragraph per chunk so a long recording is scannable
+                f_clean.write("\n\n".join(text for _, _, text in chunk_results if text) + "\n")
 
             duration = time.time() - start_time
             print("-" * 50)
