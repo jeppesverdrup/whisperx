@@ -146,7 +146,9 @@ Diarize mode uses OpenAI's `gpt-4o-transcribe-diarize` API to identify and label
 - Requires a valid OpenAI API key set in `whisperx.py`
 - Audio is converted to compressed mono 16 kHz chunks (OpenAI limits uploads to 25 MB), split at quiet moments, and stitched back together
 - Chunks are up to ~20 minutes; speaker labels are assigned per chunk, so they are not guaranteed to match across chunks
-- Output labels speakers as `speaker_0`, `speaker_1`, etc.
+- Output labels unnamed speakers per chunk as `A`, `B`, `C`, ... and the same letter can mean different people in different chunks (use known speakers below to avoid this)
+- **Known speakers (optional, up to 4):** give a name plus a 2-10 s sample of only that person, either `START-END` seconds in the recording (e.g. `36-44` or `1:05-1:12`) or a short audio file. That name is then used as the label across the whole file, in every chunk. Anyone without a sample still gets a per-chunk letter. Voice samples you reuse can be saved once in `KNOWN_SPEAKER_FILES` at the top of `whisperx.py`
+- `_log.txt` keeps every segment. `_clean.txt` folds short interjections ("yeah", "mm-hmm") that sit inside someone else's turn into that turn and merges consecutive segments from the same speaker, so it reads as a conversation
 
 **Cost:** Diarize mode makes API calls to OpenAI and will incur usage costs depending on audio length.
 
