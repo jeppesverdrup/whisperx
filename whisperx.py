@@ -1,5 +1,8 @@
 import os
+import re
+import io
 import time
+import base64
 import tempfile
 import subprocess
 import requests
@@ -9,14 +12,19 @@ from pydub import AudioSegment
 
 # --- CONFIGURATION ---
 DEFAULT_MODEL = "medium"
-VERSION = "1.5"
+VERSION = "1.6"
 AVAILABLE_MODELS = ["tiny", "base", "small", "medium", "large-v1", "large-v2", "large-v3", "large-v3-turbo"]
 OPENAI_API_KEY = "YOUR_API_KEY_HERE"  # <-- Paste your OpenAI API key here (needed for Diarize and GPT Transcribe modes)
 ELEVENLABS_API_KEY = "YOUR_API_KEY_HERE"  # <-- Paste your ElevenLabs API key here (only needed for ElevenLabs mode)
 MAX_CHUNK_SECONDS = 1200  # OpenAI limit is 1500s; use 1200s (20 min) for safety margin
 GPT_TRANSCRIBE_CHUNK_SECONDS = 120  # gpt-transcribe returns no timestamps, so chunk length sets log granularity
+KNOWN_SPEAKER_FILES = {}  # <-- Saved voice samples for Diarize (2-10 s each, max 4), e.g. {"Trond": r"C:\Whisper\voices\trond.wav"}
 GPT_TRANSCRIBE_KEYWORDS = []  # <-- Names/terms always sent to GPT Transcribe, e.g. ["Trond", "EDW"]; more can be added per run
 OPENAI_MAX_UPLOAD_BYTES = 25 * 1024 * 1024  # OpenAI audio upload limit
+MAX_KNOWN_SPEAKERS = 4  # OpenAI limit for known speaker references
+VOICE_SAMPLE_SECONDS = (2, 10)  # OpenAI requires each reference clip to be 2-10 s
+BACKCHANNEL_WORDS = {"yeah", "yes", "yep", "mm", "mhm", "mm-hmm", "hmm", "uh-huh", "okay", "ok", "right", "exactly", "sure", "oh", "uh", "um", "absolutely"}
+BACKCHANNEL_MAX_WORDS = 2  # interjections up to this length are folded into the surrounding turn in _clean.txt
 OPENAI_CHUNK_BITRATE = "48k"  # mono 16 kHz speech; ~6 KB/s so a 20 min chunk is ~7 MB
 ELEVENLABS_STT_URL = "https://api.elevenlabs.io/v1/speech-to-text"
 # ---------------------
@@ -86,6 +94,118 @@ def iter_chunks(audio, bounds):
             os.remove(tmp_path)
 
 
+def parse_time(text):
+    """Seconds from '83', '83.5', '1:23' or '1:02:03'."""
+    parts = text.strip().split(":")
+    if not 1 <= len(parts) <= 3:
+        raise ValueError(f"'{text}' is not a time")
+    seconds = 0.0
+    for part in parts:
+        try:
+            seconds = seconds * 60 + float(part)
+        except ValueError:
+            raise ValueError(f"'{text}' is not a time") from None
+    return seconds
+
+
+def load_voice_sample(ref, audio):
+    """Reference clip for one speaker: a short audio file, or START-END seconds inside this recording."""
+    ref = ref.strip().strip('"')
+    if os.path.isfile(ref):
+        clip = load_audio_mono(ref)
+    else:
+        match = re.match(r"^\s*([\d:.]+)\s*[-\u2013]\s*([\d:.]+)\s*$", ref)
+        if not match:
+            raise ValueError("expected a file path or START-END in this recording, e.g. 36-44 or 1:05-1:12")
+        start, end = parse_time(match.group(1)), parse_time(match.group(2))
+        if end <= start or end * 1000 > len(audio):
+            raise ValueError(f"{ref} is outside this {len(audio) / 1000:.0f}s recording")
+        clip = audio[int(start * 1000):int(end * 1000)]
+    seconds = len(clip) / 1000.0
+    low, high = VOICE_SAMPLE_SECONDS
+    if not low <= seconds <= high:
+        raise ValueError(f"the sample is {seconds:.1f}s but must be {low}-{high}s")
+    return clip
+
+
+def clip_to_data_url(clip):
+    buf = io.BytesIO()
+    clip.export(buf, format="wav")
+    return "data:audio/wav;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def ask_known_speakers(audio):
+    """Saved voice samples plus any added now. Returns (names, data_urls) for the diarize request."""
+    names, refs = [], []
+
+    for name, path in KNOWN_SPEAKER_FILES.items():
+        if len(names) >= MAX_KNOWN_SPEAKERS:
+            break
+        try:
+            refs.append(clip_to_data_url(load_voice_sample(path, audio)))
+            names.append(name)
+            print(f"Using saved voice sample for {name}.")
+        except ValueError as e:
+            print(f"Skipping saved voice sample for {name}: {e}")
+
+    if len(names) < MAX_KNOWN_SPEAKERS:
+        low, high = VOICE_SAMPLE_SECONDS
+        print(f"\nKnown speakers (optional, up to {MAX_KNOWN_SPEAKERS}): give a name and a {low}-{high}s sample of only that person")
+        print("  so their name is used as the label across the whole file. Press Enter to skip.")
+        while len(names) < MAX_KNOWN_SPEAKERS:
+            name = input("  Speaker name (Enter to finish): ").strip()
+            if not name:
+                break
+            if name in names:
+                print(f"  {name} is already added.")
+                continue
+            ref = input(f"  Sample for {name} (file path, or START-END in this recording e.g. 36-44 or 1:05-1:12): ")
+            try:
+                refs.append(clip_to_data_url(load_voice_sample(ref, audio)))
+                names.append(name)
+            except ValueError as e:
+                print(f"  Not added: {e}")
+
+    return names, refs
+
+
+def tidy_turns(segments):
+    """Speaker turns for _clean.txt: drop short 'yeah'/'mm-hmm' interjections that sit inside someone
+    else's turn, drop empty segments, and join consecutive segments from the same speaker."""
+    items = [(seg.get("speaker", "Unknown"), seg.get("text", "").strip()) for seg in segments]
+    items = [(speaker, text) for speaker, text in items if text]
+
+    def is_backchannel(text):
+        words = re.findall(r"[\w'-]+", text.lower())
+        return 0 < len(words) <= BACKCHANNEL_MAX_WORDS and all(w in BACKCHANNEL_WORDS for w in words)
+
+    backchannel = [is_backchannel(text) for _, text in items]
+
+    # nearest non-interjection neighbour on each side of every item
+    prev_real, last = [], None
+    for i in range(len(items)):
+        prev_real.append(last)
+        if not backchannel[i]:
+            last = i
+    next_real, nxt = [None] * len(items), None
+    for i in range(len(items) - 1, -1, -1):
+        next_real[i] = nxt
+        if not backchannel[i]:
+            nxt = i
+
+    turns = []
+    for i, (speaker, text) in enumerate(items):
+        if backchannel[i]:
+            p, n = prev_real[i], next_real[i]
+            if p is not None and n is not None and items[p][0] == items[n][0] != speaker:
+                continue
+        if turns and turns[-1][0] == speaker:
+            turns[-1][1] += " " + text
+        else:
+            turns.append([speaker, text])
+    return [(speaker, text) for speaker, text in turns]
+
+
 def main():
     print(LOGO)
     print(f"  Version {VERSION}")
@@ -136,6 +256,12 @@ def main():
             audio_duration_s = len(audio) / 1000.0
             bounds = plan_chunks(audio, MAX_CHUNK_SECONDS)
 
+            speaker_kwargs = {}
+            known_names, known_refs = ask_known_speakers(audio)
+            if known_names:
+                speaker_kwargs = {"known_speaker_names": known_names, "known_speaker_references": known_refs}
+            start_time = time.time()
+
             if len(bounds) == 1:
                 print(f"Audio duration: {audio_duration_s:.0f}s (within API limit)")
             else:
@@ -155,6 +281,7 @@ def main():
                             model="gpt-4o-transcribe-diarize",
                             response_format="diarized_json",
                             chunking_strategy="auto",
+                            **speaker_kwargs,
                         )
 
                     chunk_segments = transcript.to_dict().get("segments", [])
@@ -183,28 +310,22 @@ def main():
 
                 print("-" * 50)
 
-                current_speaker = None
-
                 for seg in all_segments:
                     speaker = seg.get("speaker", "Unknown")
                     text = seg.get("text", "").strip()
                     start = seg.get("start", 0)
                     end = seg.get("end", 0)
 
-                    # Write Log (Speaker + Time + Text)
+                    # Write Log (Speaker + Time + Text), every segment
                     timestamp = f"[{start:.2f}s -> {end:.2f}s]"
                     f_log.write(f"{speaker} {timestamp} {text}\n")
 
-                    # Write Clean (Speaker: Text, grouped by speaker turns)
-                    if speaker != current_speaker:
-                        if current_speaker is not None:
-                            f_clean.write("\n")
-                        f_clean.write(f"{speaker}: ")
-                        current_speaker = speaker
-                    f_clean.write(text + " ")
-
                     # Live Preview
                     print(f"  {speaker} {timestamp} {text}")
+
+                # Write Clean (Speaker: Text), interjections folded into the surrounding turn
+                turns = tidy_turns(all_segments)
+                f_clean.write("\n\n".join(f"{speaker}: {text}" for speaker, text in turns) + "\n")
 
             duration = time.time() - start_time
             print("-" * 50)
